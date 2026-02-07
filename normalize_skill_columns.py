@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import ast
 import csv
+import json
 import re
 import sys
 import unicodedata
@@ -49,6 +50,27 @@ MISSING_STRINGS = {
     "none",
     "null",
 }
+
+# Seed bases help guarantee normalization like:
+# - "python programming" / "programmation python" / "programming python" -> "python"
+# even if the dataset is small and the base-learning frequency threshold isn't met.
+DEFAULT_HARD_SKILL_SEEDS = [
+    "python",
+    "sql",
+    "r",
+    "excel",
+    "tableau",
+    "power bi",
+    "snowflake",
+    "dbt",
+    "azure",
+    "aws",
+    "gcp",
+    "spark",
+    "docker",
+    "kubernetes",
+    "git",
+]
 
 
 _RE_MULTI_SPLIT = re.compile(r"\s*(?:,|\||/|\n|\t)+\s*")
@@ -147,6 +169,42 @@ def token_signature(norm: str) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True)
+class ExplicitMaps:
+    exact: dict[str, str]
+    signature: dict[tuple[str, ...], str]
+
+
+def load_normalization_map(path: Optional[Path]) -> ExplicitMaps:
+    """
+    Load a JSON mapping of variant -> canonical.
+
+    Example (any one permutation is enough):
+    {
+      "python programmation": "python"
+    }
+
+    Matching is done after `normalize_text()`. In addition to exact matches, we also build a
+    permutation-insensitive mapping using the token signature of each key.
+    """
+    if path is None:
+        return ExplicitMaps(exact={}, signature={})
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected JSON object in {path}, got {type(data).__name__}")
+
+    exact: dict[str, str] = {}
+    sig: dict[tuple[str, ...], str] = {}
+    for k, v in data.items():
+        nk = normalize_text(str(k))
+        nv = normalize_text(str(v))
+        if not nk or not nv:
+            continue
+        exact[nk] = nv
+        sig[token_signature(nk)] = nv
+    return ExplicitMaps(exact=exact, signature=sig)
+
+
+@dataclass(frozen=True)
 class BasePhrase:
     norm: str
     tokens: frozenset[str]
@@ -194,7 +252,12 @@ def build_inverted_index(bases: list[BasePhrase]) -> dict[str, list[BasePhrase]]
     return idx
 
 
-def choose_best_base(norm_phrase: str, idx: dict[str, list[BasePhrase]]) -> Optional[BasePhrase]:
+def choose_best_base(
+    norm_phrase: str,
+    idx: dict[str, list[BasePhrase]],
+    *,
+    priority_norms: Optional[set[str]] = None,
+) -> Optional[BasePhrase]:
     toks = norm_phrase.split()
     if not toks:
         return None
@@ -212,6 +275,15 @@ def choose_best_base(norm_phrase: str, idx: dict[str, list[BasePhrase]]) -> Opti
         if best is None:
             best = b
             continue
+
+        # Prefer priority bases (e.g. "python") over non-priority ones.
+        b_prio = 1 if (priority_norms and b.norm in priority_norms) else 0
+        best_prio = 1 if (priority_norms and best.norm in priority_norms) else 0
+        if b_prio != best_prio:
+            if b_prio > best_prio:
+                best = b
+            continue
+
         # Prefer base with more tokens; if equal, prefer higher count.
         if len(b.tokens) > len(best.tokens):
             best = b
@@ -224,6 +296,8 @@ def normalize_items(
     raw_items: list[str],
     *,
     base_index: Optional[dict[str, list[BasePhrase]]] = None,
+    priority_norms: Optional[set[str]] = None,
+    explicit_maps: Optional[ExplicitMaps] = None,
     emit_snake_case: bool = True,
 ) -> list[str]:
     """
@@ -237,8 +311,14 @@ def normalize_items(
         if not norm:
             continue
 
+        if explicit_maps:
+            # Exact variant mapping
+            norm = explicit_maps.exact.get(norm, norm)
+            # Permutation-insensitive mapping (covers "programmation python" vs "python programmation")
+            norm = explicit_maps.signature.get(token_signature(norm), norm)
+
         if base_index:
-            base = choose_best_base(norm, base_index)
+            base = choose_best_base(norm, base_index, priority_norms=priority_norms)
             if base is not None:
                 norm = base.norm
 
@@ -271,6 +351,10 @@ def normalize_csv(
     columns: tuple[str, str, str] = ("Hard_Skills", "Soft_Skills", "Benefits"),
     min_base_count: int = 8,
     max_base_tokens: int = 3,
+    hard_skill_seeds: Optional[list[str]] = None,
+    hard_map_path: Optional[Path] = None,
+    soft_map_path: Optional[Path] = None,
+    benefits_map_path: Optional[Path] = None,
     add_new_columns: bool = True,
     inplace: bool = False,
 ) -> None:
@@ -282,6 +366,15 @@ def normalize_csv(
         min_count=min_base_count,
         max_tokens=max_base_tokens,
     )
+    # Add seeds (high priority) so we can normalize even on small datasets.
+    seed_norms = [normalize_text(s) for s in (hard_skill_seeds or DEFAULT_HARD_SKILL_SEEDS)]
+    seed_norms = [s for s in seed_norms if s]
+    seed_set = set(seed_norms)
+    existing_hard = {b.norm for b in hard_bases}
+    for s in seed_norms:
+        if s in existing_hard:
+            continue
+        hard_bases.append(BasePhrase(norm=s, tokens=frozenset(s.split()), count=10**9))
     soft_bases = learn_base_phrases(
         iter_column_items(input_path, soft_col, delimiter=delimiter),
         min_count=min_base_count,
@@ -296,6 +389,10 @@ def normalize_csv(
     hard_idx = build_inverted_index(hard_bases)
     soft_idx = build_inverted_index(soft_bases)
     ben_idx = build_inverted_index(ben_bases)
+
+    hard_maps = load_normalization_map(hard_map_path)
+    soft_maps = load_normalization_map(soft_map_path)
+    ben_maps = load_normalization_map(benefits_map_path)
 
     # Pass 2: normalize and write
     with input_path.open("r", encoding="utf-8", newline="") as fin, output_path.open(
@@ -328,9 +425,22 @@ def normalize_csv(
 
         for row in reader:
             # Normalize per column
-            hard_items = normalize_items(parse_multi_value_cell(row.get(hard_col)), base_index=hard_idx)
-            soft_items = normalize_items(parse_multi_value_cell(row.get(soft_col)), base_index=soft_idx)
-            ben_items = normalize_items(parse_multi_value_cell(row.get(ben_col)), base_index=ben_idx)
+            hard_items = normalize_items(
+                parse_multi_value_cell(row.get(hard_col)),
+                base_index=hard_idx,
+                priority_norms=seed_set,
+                explicit_maps=hard_maps,
+            )
+            soft_items = normalize_items(
+                parse_multi_value_cell(row.get(soft_col)),
+                base_index=soft_idx,
+                explicit_maps=soft_maps,
+            )
+            ben_items = normalize_items(
+                parse_multi_value_cell(row.get(ben_col)),
+                base_index=ben_idx,
+                explicit_maps=ben_maps,
+            )
 
             hard_joined = ", ".join(hard_items) if hard_items else ""
             soft_joined = ", ".join(soft_items) if soft_items else ""
@@ -359,6 +469,14 @@ def main(argv: list[str]) -> int:
     p.add_argument("--min-base-count", type=int, default=8, help="Min frequency to treat an item as canonical base.")
     p.add_argument("--max-base-tokens", type=int, default=3, help="Max tokens for canonical base phrases.")
     p.add_argument(
+        "--hard-seeds",
+        default=",".join(DEFAULT_HARD_SKILL_SEEDS),
+        help="Comma-separated seed hard-skill bases to always collapse to.",
+    )
+    p.add_argument("--hard-map", type=Path, default=None, help="Optional JSON mapping file for hard skills.")
+    p.add_argument("--soft-map", type=Path, default=None, help="Optional JSON mapping file for soft skills.")
+    p.add_argument("--benefits-map", type=Path, default=None, help="Optional JSON mapping file for benefits.")
+    p.add_argument(
         "--inplace",
         action="store_true",
         help="Replace original columns instead of creating *_Normalized columns.",
@@ -372,6 +490,10 @@ def main(argv: list[str]) -> int:
         columns=(args.hard_col, args.soft_col, args.benefits_col),
         min_base_count=args.min_base_count,
         max_base_tokens=args.max_base_tokens,
+        hard_skill_seeds=[s.strip() for s in str(args.hard_seeds).split(",") if s.strip()],
+        hard_map_path=args.hard_map,
+        soft_map_path=args.soft_map,
+        benefits_map_path=args.benefits_map,
         inplace=args.inplace,
         add_new_columns=not args.inplace,
     )
