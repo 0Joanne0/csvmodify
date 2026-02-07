@@ -59,17 +59,9 @@ DEFAULT_HARD_SKILL_SEEDS = [
     "sql",
     "r",
     "excel",
-    "tableau",
-    "power bi",
-    "snowflake",
-    "dbt",
-    "azure",
-    "aws",
-    "gcp",
-    "spark",
-    "docker",
-    "kubernetes",
     "git",
+    "power bi",
+    "tableau",
 ]
 
 

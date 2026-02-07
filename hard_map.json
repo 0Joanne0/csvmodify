@@ -1,0 +1,55 @@
+{
+  "python programming": "python",
+  "programming python": "python",
+  "programmation python": "python",
+  "python programmation": "python",
+  "programmation en python": "python",
+  "developpement python": "python",
+  "développement python": "python",
+  "python scripting": "python",
+  "scripting python": "python",
+  "scripts python": "python",
+
+  "structured query language": "sql",
+  "sql queries": "sql",
+  "requete sql": "sql",
+  "requêtes sql": "sql",
+  "requete en sql": "sql",
+  "requêtes en sql": "sql",
+
+  "powerbi": "power bi",
+  "microsoft powerbi": "power bi",
+  "microsoft power bi": "power bi",
+  "ms power bi": "power bi",
+  "pbi": "power bi",
+
+  "ml": "machine learning",
+  "apprentissage automatique": "machine learning",
+  "apprentissage machine": "machine learning",
+
+  "dl": "deep learning",
+
+  "datascience": "data science",
+
+  "c plus plus": "c++",
+  "cplusplus": "c++",
+  "c sharp": "c#",
+  "csharp": "c#",
+
+  "k8s": "kubernetes",
+
+  "google bigquery": "bigquery",
+  "gcp bigquery": "bigquery",
+
+  "github actions": "ci",
+  "gitlab ci": "ci",
+
+  "qualite des donnees": "data quality",
+  "qualité des données": "data quality",
+  "quality data": "data quality",
+
+  "pipelines de donnees": "data pipelines",
+  "pipelines de données": "data pipelines",
+  "data pipeline": "data pipelines"
+}
+
